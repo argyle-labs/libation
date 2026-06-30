@@ -1,9 +1,0 @@
-services:
-  libation:
-    image: ghcr.io/scottdkey/libation:latest
-    container_name: libation
-    restart: unless-stopped
-    ports:
-      - "9494:9494"
-    volumes:
-      - /opt/libation/config:/config
