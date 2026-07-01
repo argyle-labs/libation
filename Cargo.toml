@@ -2,6 +2,10 @@
 name = "libation"
 version = "0.1.0"
 edition = "2021"
+description = "Audible library downloader — orca service-backend"
+
+[package.metadata.orca]
+category = "downloads"
 
 [lib]
 name = "libation"
