@@ -14,7 +14,7 @@ This repo is **self-contained** — the steps below run libation **by hand, with
 
 ## Run it without orca
 
-### Docker / Podman
+### Docker Compose
 
 ```yaml
 # compose.yml
@@ -34,7 +34,23 @@ services:
 docker compose up -d
 ```
 
-Podman: the same file with `podman-compose up -d`.
+### Other runtimes
+
+**Podman** — the compose above works with `podman compose up -d`, or run it directly:
+
+```sh
+podman run -d --name libation --restart unless-stopped \
+    -p 9494:9494/tcp \
+    -v ./config:/config \
+    -v ./books:/data \
+    rmcrackan/libation:latest
+```
+
+**LXC** — on a container-capable LXC (e.g. a Proxmox LXC with nesting enabled) run the same image via Docker/Podman as above, or install libation from upstream directly on the guest: <https://github.com/rmcrackan/Libation>.
+
+**VM** — install libation from upstream (<https://github.com/rmcrackan/Libation>) or run the same container image inside the VM; expose port `9494`.
+
+**Unraid** — add via *Community Applications*, or *Docker → Add Container* with image `rmcrackan/libation:latest`, port `9494`, and the volume paths above.
 
 ### Ports & data
 
