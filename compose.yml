@@ -1,0 +1,16 @@
+# Libation - Audible Audiobook Downloader
+# docs: ../../docs/services/libation.md
+
+services:
+  libation:
+    image: rmcrackan/libation:${LIBATION_IMAGE_TAG:-latest}
+    container_name: libation
+    environment:
+      - TZ=${TZ:-America/Denver}
+      - SLEEP_TIME=${LIBATION_SLEEP_TIME:-6h}
+    volumes:
+      - ${LIBATION_CONFIG_PATH:-/opt/appdata/libation}:/config
+      - ${MEDIA_PATH:-/mnt/pool/data/media}/audiobooks/audible:/data
+    tmpfs:
+      - /tmp:size=2g
+    restart: unless-stopped
