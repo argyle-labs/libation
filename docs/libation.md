@@ -1,33 +1,42 @@
 # Libation
 
-Audible audiobook downloader and DRM remover. Downloads your Audible purchases as DRM-free m4b files.
+Downloads and converts your own Audible purchases to open (DRM-free) formats for
+personal use, and manages your Audible library.
 
-- **Host**: <host> (<ip>)
-- **Port**: 8008 (configurable via `LIBATION_PORT`)
-- **Image**: `ghcr.io/rmcrackan/libation`
-- **Compose**: [compose/libation/docker-compose.yml](../../compose/libation/docker-compose.yml)
+- **Port**: `9494` (web UI)
+- **Image**: `rmcrackan/libation:latest`
+- **Upstream**: <https://github.com/rmcrackan/Libation>
 
 ## Volumes
 
-| Host Path | Container Path | Description |
-|-----------|---------------|-------------|
-| `/opt/appdata/libation` | `/config` | Libation config and Audible credentials |
-| `/mnt/<host>/data/media/audiobooks/audible` | `/data` | Downloaded audiobooks output |
+| Container Path | Description |
+|----------------|-------------|
+| `/config` | Libation config and Audible credentials |
+| `/data` | Downloaded audiobooks output |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TZ` | `Etc/UTC` | Timezone |
-| `LIBATION_IMAGE_TAG` | `latest` | Image tag |
-| `LIBATION_CONFIG_PATH` | `/opt/appdata/libation` | Config directory |
-| `LIBATION_PORT` | `8008` | Host port |
-| `MEDIA_PATH` | `/mnt/<host>/data/media` | Media base path |
 
 ## Deploy
 
+```yaml
+# compose.yml
+services:
+  libation:
+    image: rmcrackan/libation:latest
+    container_name: libation
+    restart: unless-stopped
+    ports:
+      - "9494:9494/tcp"   # web UI
+    volumes:
+      - ./config:/config
+      - ./books:/data
+```
+
 ```bash
-cd compose/libation
 docker compose up -d
 ```
 
@@ -35,7 +44,7 @@ docker compose up -d
 
 Libation requires a one-time browser-based Audible login:
 
-1. Open `http://<ip>:8008`
+1. Open `http://<host>:9494`
 2. Go to **Settings → Account → Add Account**
 3. Select your Audible locale (US = audible.com)
 4. Click **Authenticate** — this opens an Audible login URL
@@ -49,10 +58,7 @@ Authentication only needs to be done once. Credentials persist in the config vol
 After authentication:
 
 1. **Library → Scan Library** — pulls your full Audible purchase list
-2. **Library → Download All** — downloads and decrypts all purchases to `/data` as `.m4b`
-3. Files land at `/mnt/<host>/data/media/audiobooks/audible/` on <host>
-
-Audiobookshelf will pick them up automatically on its next scan.
+2. **Library → Download All** — downloads and converts your purchases to `/data` as `.m4b`
 
 ## Ongoing Sync
 
