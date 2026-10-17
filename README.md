@@ -23,8 +23,8 @@ services:
     image: rmcrackan/libation:latest
     container_name: libation
     restart: unless-stopped
-    ports:
-      - "9494:9494/tcp"   # web UI
+    environment:
+      - SLEEP_TIME=6h
     volumes:
       - ./config:/config
       - ./books:/data
@@ -40,7 +40,7 @@ docker compose up -d
 
 ```sh
 podman run -d --name libation --restart unless-stopped \
-    -p 9494:9494/tcp \
+    -e SLEEP_TIME=6h \
     -v ./config:/config \
     -v ./books:/data \
     rmcrackan/libation:latest
@@ -48,15 +48,15 @@ podman run -d --name libation --restart unless-stopped \
 
 **LXC** — on a container-capable LXC (e.g. a Proxmox LXC with nesting enabled) run the same image via Docker/Podman as above, or install libation from upstream directly on the guest: <https://github.com/rmcrackan/Libation>.
 
-**VM** — install libation from upstream (<https://github.com/rmcrackan/Libation>) or run the same container image inside the VM; expose port `9494`.
+**VM** — install libation from upstream (<https://github.com/rmcrackan/Libation>) or run the same container image inside the VM.
 
-**Unraid** — add via *Community Applications*, or *Docker → Add Container* with image `rmcrackan/libation:latest`, port `9494`, and the volume paths above.
+**Unraid** — add via *Community Applications*, or *Docker → Add Container* with image `rmcrackan/libation:latest` and the volume paths above.
 
 ### Ports & data
 
 | | |
 |---|---|
-| Default port | `9494` |
+| Ports | none; the image is headless (`LibationCli scan` then `liberate`, every `SLEEP_TIME`) |
 | Upstream | <https://github.com/rmcrackan/Libation> |
 | Operator notes | [libation.md](docs/libation.md) |
 
