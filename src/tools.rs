@@ -84,12 +84,29 @@ pub fn summarize(books: &[LibationBook]) -> LibationSummary {
     s
 }
 
-fn load(file: &str) -> Result<Vec<LibationBook>> {
-    if !file.ends_with(".json") {
-        bail!("export file must be a .json Libation export");
+const MAX_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn read_export(file: &str) -> Option<String> {
+    use std::io::Read;
+    let path = std::fs::canonicalize(file).ok()?;
+    if path.extension()? != "json" {
+        return None;
     }
-    let body = std::fs::read_to_string(file).map_err(|_| anyhow!("cannot read export file"))?;
-    parse_export(&body)
+    let f = std::fs::File::open(&path).ok()?;
+    let meta = f.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_EXPORT_BYTES {
+        return None;
+    }
+    let mut body = String::new();
+    f.take(MAX_EXPORT_BYTES + 1)
+        .read_to_string(&mut body)
+        .ok()?;
+    (body.len() as u64 <= MAX_EXPORT_BYTES).then_some(body)
+}
+
+fn load(file: &str) -> Result<Vec<LibationBook>> {
+    let body = read_export(file).ok_or_else(|| anyhow!("not a readable Libation JSON export"))?;
+    parse_export(&body).map_err(|_| anyhow!("not a readable Libation JSON export"))
 }
 
 /// List the Audible library from a Libation JSON export: ASIN, title, authors,
@@ -156,6 +173,30 @@ mod tests {
             .to_string();
         assert!(!err.contains("hunter2"));
         assert!(load("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn load_rejects_symlink_to_non_json_and_dirs() {
+        let dir = std::env::temp_dir().join(format!("libation-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("d.json")).unwrap();
+        let target = dir.join("secret.txt");
+        std::fs::write(&target, "[]").unwrap();
+        let link = dir.join("link.json");
+        std::fs::remove_file(&link).ok();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let ok = dir.join("ok.json");
+        std::fs::write(&ok, EXPORT).unwrap();
+        let e1 = load(link.to_str().unwrap()).unwrap_err().to_string();
+        let e2 = load(dir.join("d.json").to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        let e3 = load(dir.join("missing.json").to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(e1, e2);
+        assert_eq!(e2, e3);
+        assert_eq!(load(ok.to_str().unwrap()).unwrap().len(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
