@@ -1,5 +1,7 @@
 #![allow(clippy::disallowed_types)]
 
+pub mod tools;
+
 use plugin_toolkit::service::{
     BoxFuture, Routes, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
     WorkloadSpec,
