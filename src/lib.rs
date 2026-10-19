@@ -2,10 +2,18 @@
 
 pub mod tools;
 
+use plugin_toolkit::clap;
 use plugin_toolkit::service::{
     BoxFuture, Routes, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
     WorkloadSpec,
 };
+
+#[plugin_toolkit::endpoint_resource(plugin = "libation")]
+pub struct LibationEndpoint {
+    pub name: String,
+    pub export_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LibationBackend {
     provider: &'static str,

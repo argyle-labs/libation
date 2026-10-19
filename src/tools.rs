@@ -1,11 +1,13 @@
 use plugin_toolkit::prelude::*;
 use plugin_toolkit::serde_json::Value;
 
+use crate::endpoint_db;
+
 #[orca_struct(args)]
 pub struct ExportArgs {
-    /// Path to a `LibationCli export --json -p <file>` export on this host.
+    /// Registered libation endpoint name.
     #[arg(long)]
-    pub file: String,
+    pub name: String,
     /// Only return books whose BookStatus matches (e.g. Liberated, NotLiberated, Error).
     #[arg(long)]
     pub status: Option<String>,
@@ -49,6 +51,9 @@ pub fn parse_export(json: &str) -> Result<Vec<LibationBook>> {
     let rows = root
         .as_array()
         .ok_or_else(|| anyhow!("not a Libation JSON export"))?;
+    if rows.len() > MAX_ROWS {
+        bail!("Libation export exceeds {MAX_ROWS} rows");
+    }
     Ok(rows
         .iter()
         .map(|r| LibationBook {
@@ -85,6 +90,7 @@ pub fn summarize(books: &[LibationBook]) -> LibationSummary {
 }
 
 const MAX_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ROWS: usize = 100_000;
 
 fn read_export(file: &str) -> Option<String> {
     use std::io::Read;
@@ -104,6 +110,10 @@ fn read_export(file: &str) -> Option<String> {
     (body.len() as u64 <= MAX_EXPORT_BYTES).then_some(body)
 }
 
+fn load_endpoint(name: &str) -> Result<Vec<LibationBook>> {
+    load(&endpoint_db::require(name)?.export_path)
+}
+
 fn load(file: &str) -> Result<Vec<LibationBook>> {
     let body = read_export(file).ok_or_else(|| anyhow!("not a readable Libation JSON export"))?;
     parse_export(&body).map_err(|_| anyhow!("not a readable Libation JSON export"))
@@ -112,9 +122,9 @@ fn load(file: &str) -> Result<Vec<LibationBook>> {
 /// List the Audible library from a Libation JSON export: ASIN, title, authors,
 /// narrators, series + order and liberation status. The purchased-audiobook
 /// inventory for gap audits against audiobookshelf/LazyLibrarian.
-#[orca_tool(domain = "libation", verb = "library.list", role = "admin")]
+#[orca_tool(domain = "libation", verb = "library.list", role = "read")]
 async fn libation_library_list(args: ExportArgs, _ctx: &ToolCtx) -> Result<Vec<LibationBook>> {
-    let books = load(&args.file)?;
+    let books = load_endpoint(&args.name)?;
     Ok(match args.status {
         Some(want) => books
             .into_iter()
@@ -125,9 +135,9 @@ async fn libation_library_list(args: ExportArgs, _ctx: &ToolCtx) -> Result<Vec<L
 }
 
 /// Count books in a Libation JSON export by liberation status.
-#[orca_tool(domain = "libation", verb = "library.summary", role = "admin")]
+#[orca_tool(domain = "libation", verb = "library.summary", role = "read")]
 async fn libation_library_summary(args: ExportArgs, _ctx: &ToolCtx) -> Result<LibationSummary> {
-    Ok(summarize(&load(&args.file)?))
+    Ok(summarize(&load_endpoint(&args.name)?))
 }
 
 #[cfg(test)]
@@ -200,13 +210,38 @@ mod tests {
     }
 
     #[test]
-    fn tools_declare_admin_role() {
+    fn rejects_export_over_row_cap() {
+        let body = format!("[{}{{}}]", "{},".repeat(MAX_ROWS));
+        assert!(parse_export(&body).is_err());
+        let body = format!("[{}{{}}]", "{},".repeat(MAX_ROWS - 1));
+        assert_eq!(parse_export(&body).unwrap().len(), MAX_ROWS);
+    }
+
+    #[test]
+    fn read_tools_are_read_role_and_endpoint_writes_admin() {
         for n in ["libation.library.list", "libation.library.summary"] {
+            assert_eq!(
+                plugin_toolkit::dispatch::required_role(n),
+                Some("read"),
+                "{n}"
+            );
+        }
+        for n in ["libation.create", "libation.update", "libation.delete"] {
             assert_eq!(
                 plugin_toolkit::dispatch::required_role(n),
                 Some("admin"),
                 "{n}"
             );
         }
+    }
+
+    #[test]
+    fn export_args_take_endpoint_name_not_file() {
+        let args: ExportArgs = plugin_toolkit::serde_json::from_value(
+            plugin_toolkit::serde_json::json!({"name": "home"}),
+        )
+        .unwrap();
+        assert_eq!(args.name, "home");
+        assert!(args.status.is_none());
     }
 }
