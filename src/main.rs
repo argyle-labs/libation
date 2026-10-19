@@ -1,17 +1,12 @@
-//! Dynamic (subprocess) entrypoint for the libation plugin.
-//!
-//! A single-facet `service` plugin: the [`Plugin`](plugin_toolkit::plugin::Plugin)
-//! builder registers the [`ServiceBackend`] and emits all the wire dispatch, so
-//! the plugin hand-writes no op strings and owns no runtime — it reaches orca
-//! only through the socket.
 plugin_toolkit::instrument::bootstrap!();
 
-use libation::LibationBackend;
-use plugin_toolkit::plugin::Plugin;
+#[allow(unused_imports)]
+use libation::tools as _;
 
 fn main() -> plugin_toolkit::anyhow::Result<()> {
-    Plugin::named("libation")
+    plugin_toolkit::plugin::Plugin::named("libation")
         .version(env!("CARGO_PKG_VERSION"))
-        .service(LibationBackend::new("libation"))
+        .tools(["libation."])
+        .service(libation::LibationBackend::new("libation"))
         .serve()
 }

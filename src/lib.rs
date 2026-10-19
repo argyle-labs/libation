@@ -1,18 +1,19 @@
-//! libation service backend — Audible library downloader.
-//!
-//! Implements `ServiceBackend` so the generic `service.*` tools
-//! (deploy/backup/restore/configure/status/connect/sync) drive libation. No
-//! `#[orca_tool]`s — the only orca dep is `plugin-toolkit`. Modeled on the
-//! nfs StorageBackend. See orca/docs/PLUGIN-PROGRAM.md.
 #![allow(clippy::disallowed_types)]
 
+pub mod tools;
+
+use plugin_toolkit::clap;
 use plugin_toolkit::service::{
     BoxFuture, Routes, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
     WorkloadSpec,
 };
 
-/// libation backend. Holds only the provider name; per-instance routes/creds
-/// come from the `Routes` the generic `service.*` tools hand each op.
+#[plugin_toolkit::endpoint_resource(plugin = "libation")]
+pub struct LibationEndpoint {
+    pub name: String,
+    pub export_path: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LibationBackend {
     provider: &'static str,
@@ -28,10 +29,6 @@ impl ServiceBackend for LibationBackend {
     fn provider(&self) -> &str {
         self.provider
     }
-
-    /// Runtimes libation can be placed on. `service.deploy` hands the
-    /// `workload_spec` below to a matching deploy target — this backend never
-    /// drives pct/docker itself (that mechanic lives in the deploy-target domain).
     fn runtimes(&self) -> Vec<Runtime> {
         vec![Runtime::Docker, Runtime::Podman, Runtime::Lxc]
     }
@@ -49,11 +46,6 @@ impl ServiceBackend for LibationBackend {
     fn default_port(&self) -> u16 {
         9494
     }
-
-    /// In-workload paths holding config/data. This is ALL libation declares for
-    /// backup — the generic pluggable backup (tar for containers/LXC, PBS for
-    /// Proxmox guests when available) snapshots these. No backup/restore code
-    /// here; those are inherited from ServiceBackend's defaults.
     fn data_paths(&self) -> Vec<String> {
         vec!["/config".to_string()]
     }
@@ -64,9 +56,6 @@ impl ServiceBackend for LibationBackend {
         _instance: &'a str,
         _routes: &'a Routes,
     ) -> BoxFuture<'a, Result<WorkloadSpec, ServiceError>> {
-        // TODO: describe the libation workload (image/template, ports, mounts,
-        // env) for the chosen runtime. The deploy target turns this into a
-        // compose service / LXC config / VM. See deploy-target::WorkloadSpec.
         Box::pin(async move { Err(ServiceError::unimplemented("libation.workload_spec")) })
     }
 
@@ -76,7 +65,6 @@ impl ServiceBackend for LibationBackend {
         _routes: &'a Routes,
         _config: &'a str,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
-        // TODO: apply libation-specific config idempotently.
         Box::pin(async move { Err(ServiceError::unimplemented("libation.configure")) })
     }
 
@@ -85,7 +73,6 @@ impl ServiceBackend for LibationBackend {
         _instance: &'a str,
         _routes: &'a Routes,
     ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
-        // TODO: real health/diagnostics.
         Box::pin(async move { Err(ServiceError::unimplemented("libation.status")) })
     }
 }

@@ -1,7 +1,7 @@
 # libation — ServiceBackend contract
 
 Pure-Rust plugin (**no bash/compose/provision scripts**) driven by the single
-generic `service.*` surface — no per-plugin tools. Runtimes: **docker,podman,lxc**.
+generic `service.*` surface, plus `libation.library.list` / `libation.library.summary` over a `LibationCli export --json` file. Runtimes: **docker,podman,lxc**.
 
 ## Per-plugin code (the only work this repo owns)
 - [x] `provider` / `runtimes` / `default_port` / `capabilities` / `data_paths` — declarative descriptor
