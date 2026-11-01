@@ -287,6 +287,10 @@ impl std::fmt::Debug for Identity {
 }
 
 impl Identity {
+    pub fn access_expired(&self, now: f64) -> bool {
+        now >= self.access_expires - ACCESS_EXPIRY_MARGIN_SECS
+    }
+
     /// The mkb79 `Authenticator.to_dict()` shape, which `LibationCli import-account` reads via `Mkb79Auth`.
     pub fn to_audible_cli_json(&self) -> Value {
         let website_cookies = if self.website_cookies.is_empty() {
@@ -374,6 +378,8 @@ fn expires_in(v: &Value) -> Result<f64> {
 }
 
 const ERROR_DETAIL_MAX: usize = 256;
+/// Treat the access token as expired this many seconds early so in-flight requests do not race expiry.
+const ACCESS_EXPIRY_MARGIN_SECS: f64 = 60.0;
 
 // Amazon error bodies can echo token material; surface only the error fields, scrubbed and capped.
 fn error_detail(body: &Value, code: &str, description: &str) -> Option<String> {
@@ -631,6 +637,16 @@ mod tests {
             b["requested_extensions"],
             json!(["device_info", "customer_info"])
         );
+    }
+
+    #[test]
+    fn access_expired_applies_margin() {
+        let id = parse_register(&register_fixture(), &req(), 1000.0).unwrap();
+        assert!(!id.access_expired(1000.0));
+        assert!(!id.access_expired(4539.0));
+        assert!(id.access_expired(4540.0));
+        assert!(id.access_expired(4600.0));
+        assert!(id.access_expired(9000.0));
     }
 
     #[test]
