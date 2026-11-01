@@ -400,10 +400,40 @@ fn expires_in(v: &Value) -> Result<f64> {
     .ok_or_else(|| anyhow!("invalid expires_in: {v}"))
 }
 
+const ERROR_DETAIL_MAX: usize = 256;
+
+// Amazon error bodies can echo token material; surface only the error fields, scrubbed and capped.
+fn error_detail(body: &Value, code: &str, description: &str) -> Option<String> {
+    let parts: Vec<&str> = [code, description]
+        .iter()
+        .filter_map(|p| body.pointer(p).and_then(Value::as_str))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let scrubbed = plugin_toolkit::scrub::scrub_line(&parts.join(": ")).into_owned();
+    Some(scrubbed.chars().take(ERROR_DETAIL_MAX).collect())
+}
+
+fn register_error(body: &Value) -> Option<String> {
+    error_detail(
+        body,
+        "/response/error/code",
+        "/response/error/error_description",
+    )
+}
+
+fn refresh_error(body: &Value) -> Option<String> {
+    error_detail(body, "/error", "/error_description")
+}
+
 fn parse_register(body: &Value, req: &LoginRequest, now: f64) -> Result<Identity> {
-    let success = body
-        .pointer("/response/success")
-        .ok_or_else(|| anyhow!("register failed: {body}"))?;
+    let success = body.pointer("/response/success").ok_or_else(|| {
+        anyhow!(
+            "register failed: {}",
+            register_error(body).unwrap_or_else(|| "unrecognized response".into())
+        )
+    })?;
     let tokens = &success["tokens"];
     let expires = expires_in(&tokens["bearer"]["expires_in"])?;
     let website_cookies = tokens["website_cookies"]
@@ -452,7 +482,10 @@ pub fn register(code: &str, req: &LoginRequest) -> Result<Identity> {
         .json()
         .with_context(|| format!("register: HTTP {}", resp.status))?;
     if !resp.is_success() {
-        bail!("register: HTTP {}: {body}", resp.status);
+        match register_error(&body) {
+            Some(detail) => bail!("register: HTTP {}: {detail}", resp.status),
+            None => bail!("register: HTTP {}", resp.status),
+        }
     }
     parse_register(&body, req, now_secs())
 }
@@ -485,7 +518,14 @@ pub fn refresh(identity: &Identity) -> Result<Identity> {
         .body(refresh_body(identity));
     let resp = Client::new().send(req)?;
     if !resp.is_success() {
-        bail!("refresh: HTTP {}: {}", resp.status, resp.text());
+        match serde_json::from_slice::<Value>(&resp.body)
+            .ok()
+            .as_ref()
+            .and_then(refresh_error)
+        {
+            Some(detail) => bail!("refresh: HTTP {}: {detail}", resp.status),
+            None => bail!("refresh: HTTP {}", resp.status),
+        }
     }
     let body: Value = serde_json::from_slice(&resp.body).context("refresh: invalid json")?;
     apply_refresh(identity, &body, now_secs())
@@ -630,11 +670,31 @@ mod tests {
     #[test]
     fn register_error_surfaces() {
         let err = parse_register(
-            &json!({"response": {"error": {"code": "InvalidValue"}}}),
+            &json!({"response": {"error": {"code": "InvalidValue", "leak": "Atna|planted"}}}),
             &req(),
             0.0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("InvalidValue"), "{err}");
+        assert!(!err.contains("Atna|planted"), "{err}");
+    }
+
+    #[test]
+    fn refresh_error_extracts_only_error_fields() {
+        let detail = refresh_error(&json!({
+            "error": "invalid_grant",
+            "error_description": "x".repeat(1000),
+            "access_token": "Atna|planted",
+        }))
+        .unwrap();
+        assert!(detail.starts_with("invalid_grant"), "{detail}");
+        assert!(!detail.contains("Atna|planted"));
+        assert_eq!(detail.chars().count(), ERROR_DETAIL_MAX);
+        assert_eq!(
+            refresh_error(&json!({"access_token": "Atna|planted"})),
+            None
         );
-        assert!(err.is_err());
     }
 
     #[test]
