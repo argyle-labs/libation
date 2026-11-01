@@ -1,0 +1,25 @@
+// Shape per rmcrackan/Libation@7f37f3a Source/AudibleUtilities/Mkb79Auth.cs and mkb79/Audible@2460f9e src/audible/auth.py Authenticator.to_dict
+{
+    "website_cookies": { "session-id": "123-456", "ubid-acbuk": "789" },
+    "adp_token": "{enc:x}",
+    "access_token": "Atna|at",
+    "refresh_token": "Atnr|rt",
+    "device_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpk\n-----END RSA PRIVATE KEY-----\n",
+    "store_authentication_cookie": { "cookie": "sac" },
+    "device_info": {
+        "device_name": "Scott's Audible for iPhone",
+        "device_serial_number": "ABCdef0123456789ABCdef0123456789ABCdef01",
+        "device_type": "A2CZJZGLK2JJVM"
+    },
+    "customer_info": {
+        "account_pool": "Amazon",
+        "user_id": "amzn1.account.X",
+        "home_region": "EU",
+        "name": "Scott",
+        "given_name": "Scott"
+    },
+    "expires": 1761955200.5,
+    "locale_code": "uk",
+    "with_username": false,
+    "activation_bytes": "1a2b3c4d"
+}

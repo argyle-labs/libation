@@ -761,6 +761,179 @@ mod tests {
         assert_eq!(j["customer_info"]["user_id"], "amzn1.account.X");
     }
 
+    fn mkb79_fixture() -> Value {
+        let text = include_str!("testdata/mkb79_auth.jsonc");
+        serde_json::from_str(text.split_once('\n').unwrap().1).unwrap()
+    }
+
+    fn json_type(v: &Value) -> &'static str {
+        match v {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
+    // Keys whose Mkb79Auth.cs property is nullable (`JObject?` / `string?`) and may be emitted as null.
+    const MKB79_NULLABLE: [&str; 3] = [
+        "website_cookies",
+        "store_authentication_cookie",
+        "activation_bytes",
+    ];
+
+    fn assert_types_match(ours: &Value, golden: &Value, path: &str) {
+        let (ours, golden) = (ours.as_object().unwrap(), golden.as_object().unwrap());
+        for (k, v) in ours {
+            let at = format!("{path}/{k}");
+            let g = golden
+                .get(k)
+                .unwrap_or_else(|| panic!("{at} not in fixture"));
+            if v.is_null() && MKB79_NULLABLE.contains(&k.as_str()) {
+                continue;
+            }
+            assert_eq!(json_type(v), json_type(g), "{at}");
+            if v.is_object() {
+                assert_types_match(v, g, &at);
+            }
+        }
+    }
+
+    #[test]
+    fn audible_cli_json_types_match_mkb79_fixture() {
+        let golden = mkb79_fixture();
+        let id = parse_register(&register_fixture(), &req(), 1000.0).unwrap();
+        let ours = id.to_audible_cli_json();
+        let mut ours_keys: Vec<_> = ours.as_object().unwrap().keys().collect();
+        let mut golden_keys: Vec<_> = golden.as_object().unwrap().keys().collect();
+        ours_keys.sort();
+        golden_keys.sort();
+        assert_eq!(ours_keys, golden_keys);
+        assert_types_match(&ours, &golden, "");
+        assert_eq!(
+            ours["device_info"].as_object().unwrap().len(),
+            golden["device_info"].as_object().unwrap().len()
+        );
+
+        let bare = Identity {
+            website_cookies: BTreeMap::new(),
+            store_authentication_cookie: None,
+            ..id
+        };
+        let bare = bare.to_audible_cli_json();
+        assert!(bare["website_cookies"].is_null());
+        assert!(bare["store_authentication_cookie"].is_null());
+        assert_types_match(&bare, &golden, "");
+    }
+
+    #[derive(Deserialize)]
+    #[serde(crate = "plugin_toolkit::serde", deny_unknown_fields)]
+    struct LibationDeviceInfo {
+        device_name: Option<String>,
+        device_serial_number: Option<String>,
+        device_type: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(crate = "plugin_toolkit::serde", deny_unknown_fields)]
+    struct LibationCustomerInfo {
+        account_pool: Option<String>,
+        user_id: Option<String>,
+        home_region: Option<String>,
+        name: Option<String>,
+        given_name: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(crate = "plugin_toolkit::serde", deny_unknown_fields)]
+    struct LibationStoreCookie {
+        cookie: String,
+    }
+
+    // Mirrors Mkb79Auth.cs. Non-Option fields are the ones Libation cannot import without:
+    // `expires`/`with_username` are non-nullable C# values, `ToAccountAsync` throws without
+    // refresh/adp/private key, and `Locale` needs `locale_code`.
+    #[derive(Deserialize)]
+    #[serde(crate = "plugin_toolkit::serde", deny_unknown_fields)]
+    struct LibationMkb79Auth {
+        website_cookies: Option<BTreeMap<String, Option<String>>>,
+        adp_token: String,
+        access_token: Option<String>,
+        refresh_token: String,
+        device_private_key: String,
+        store_authentication_cookie: Option<LibationStoreCookie>,
+        device_info: Option<LibationDeviceInfo>,
+        customer_info: Option<LibationCustomerInfo>,
+        expires: f64,
+        locale_code: String,
+        with_username: bool,
+        activation_bytes: Option<String>,
+    }
+
+    #[test]
+    fn audible_cli_json_deserializes_as_libation_mkb79_auth() {
+        let golden: LibationMkb79Auth = serde_json::from_value(mkb79_fixture()).unwrap();
+        let gc = golden.customer_info.unwrap();
+        assert_eq!(gc.account_pool.as_deref(), Some("Amazon"));
+        assert_eq!(gc.home_region.as_deref(), Some("EU"));
+        assert_eq!(gc.name.as_deref(), Some("Scott"));
+        assert_eq!(gc.given_name.as_deref(), Some("Scott"));
+
+        let id = parse_register(&register_fixture(), &req(), 1000.0).unwrap();
+        let a: LibationMkb79Auth = serde_json::from_value(id.to_audible_cli_json()).unwrap();
+        assert_eq!(a.access_token.as_deref(), Some(id.access_token.as_str()));
+        assert_eq!(a.refresh_token, id.refresh_token);
+        assert_eq!(a.adp_token, id.adp_token);
+        assert_eq!(a.device_private_key, id.device_private_key);
+        assert_eq!(a.expires, id.access_expires);
+        assert_eq!(a.locale_code, "uk");
+        assert!(!a.with_username);
+        assert_eq!(a.activation_bytes, None);
+        assert_eq!(a.store_authentication_cookie.unwrap().cookie, "sac");
+        let cookies = a.website_cookies.unwrap();
+        assert_eq!(cookies["session-id"].as_deref(), Some("123-456"));
+        let d = a.device_info.unwrap();
+        assert_eq!(d.device_name.as_deref(), Some(id.device_name.as_str()));
+        assert_eq!(
+            d.device_serial_number.as_deref(),
+            Some(id.device_serial.as_str())
+        );
+        assert_eq!(d.device_type.as_deref(), Some(DEVICE_TYPE));
+        let c = a.customer_info.unwrap();
+        assert_eq!(c.user_id.as_deref(), Some(id.customer_id.as_str()));
+
+        let bare = Identity {
+            website_cookies: BTreeMap::new(),
+            store_authentication_cookie: None,
+            ..id
+        };
+        let b: LibationMkb79Auth = serde_json::from_value(bare.to_audible_cli_json()).unwrap();
+        assert!(b.website_cookies.is_none());
+        assert!(b.store_authentication_cookie.is_none());
+
+        for m in [
+            Marketplace::Us,
+            Marketplace::Uk,
+            Marketplace::De,
+            Marketplace::Fr,
+            Marketplace::Ca,
+            Marketplace::It,
+            Marketplace::Au,
+            Marketplace::In,
+            Marketplace::Jp,
+            Marketplace::Es,
+            Marketplace::Br,
+        ] {
+            assert!(
+                ["de", "us", "uk", "fr", "ca", "it", "au", "in", "jp", "es", "br"]
+                    .contains(&m.country_code()),
+                "{m:?}"
+            );
+        }
+    }
+
     #[test]
     fn debug_redacts_secrets() {
         let r = format!("{:?}", req());
