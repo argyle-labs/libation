@@ -983,4 +983,133 @@ mod tests {
         assert_eq!(expires_in(&json!("3600")).unwrap(), 3600.0);
         assert_eq!(expires_in(&json!(3600)).unwrap(), 3600.0);
     }
+
+    fn with_http<R>(
+        status: u16,
+        body: &[u8],
+        call: impl FnOnce() -> R,
+    ) -> (R, plugin_toolkit::abi::HttpRequest) {
+        use plugin_toolkit::abi::{HttpRequest, HttpResponse};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Option<HttpRequest>>> = Rc::default();
+        let reply = serde_json::to_string(&HttpResponse {
+            status,
+            headers: vec![],
+            body: body.to_vec(),
+        })
+        .unwrap();
+        let sink_seen = seen.clone();
+        let sink = Box::new(move |cap: &str, op: &str| {
+            assert_eq!(cap, "http.request");
+            *sink_seen.borrow_mut() = Some(serde_json::from_str(op).unwrap());
+            Ok::<String, String>(reply.clone())
+        });
+        let out = plugin_toolkit::capsink::with_cap_sink(sink, call);
+        let sent = seen.borrow_mut().take().expect("no request sent");
+        (out, sent)
+    }
+
+    fn header<'a>(req: &'a plugin_toolkit::abi::HttpRequest, name: &str) -> Option<&'a str> {
+        req.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn assert_register_request(sent: &plugin_toolkit::abi::HttpRequest) {
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.url, "https://api.amazon.co.uk/auth/register");
+        assert_eq!(header(sent, "content-type"), Some("application/json"));
+        let body: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body, register_body("CODE", &req()));
+    }
+
+    fn assert_refresh_request(sent: &plugin_toolkit::abi::HttpRequest) {
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.url, "https://api.amazon.co.uk/auth/token");
+        assert_eq!(
+            header(sent, "content-type"),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            String::from_utf8(sent.body.clone()).unwrap(),
+            "app_name=Audible&app_version=4.60&source_token=Atnr%7Crt&requested_token_type=access_token&source_token_type=refresh_token"
+        );
+    }
+
+    #[test]
+    fn register_http_success() {
+        let body = serde_json::to_vec(&register_fixture()).unwrap();
+        let (id, sent) = with_http(200, &body, || register("CODE", &req()));
+        assert_register_request(&sent);
+        let id = id.unwrap();
+        assert_eq!(id.access_token, "Atna|at");
+        assert_eq!(id.refresh_token, "Atnr|rt");
+        assert_eq!(id.marketplace, Marketplace::Uk);
+    }
+
+    #[test]
+    fn register_http_error_body_surfaces_code_not_tokens() {
+        let body = serde_json::to_vec(&json!({"response": {"error": {
+            "code": "InvalidValue",
+            "error_description": "bad code",
+            "leak": "Atna|planted",
+        }}}))
+        .unwrap();
+        let (res, sent) = with_http(400, &body, || register("CODE", &req()));
+        assert_register_request(&sent);
+        let err = format!("{:#}", res.unwrap_err());
+        assert!(
+            err.starts_with("register: HTTP 400: InvalidValue: bad code"),
+            "{err}"
+        );
+        assert!(!err.contains("Atna|planted"), "{err}");
+    }
+
+    #[test]
+    fn register_http_non_json_is_status_only() {
+        let (res, sent) = with_http(502, b"<html>Atna|planted</html>", || {
+            register("CODE", &req())
+        });
+        assert_register_request(&sent);
+        let err = res.unwrap_err();
+        assert_eq!(err.to_string(), "register: HTTP 502");
+        assert!(!format!("{err:#}").contains("Atna|planted"), "{err:#}");
+    }
+
+    #[test]
+    fn refresh_http_success() {
+        let id = parse_register(&register_fixture(), &req(), 0.0).unwrap();
+        let body =
+            serde_json::to_vec(&json!({"access_token": "Atna|new", "expires_in": 3600})).unwrap();
+        let (next, sent) = with_http(200, &body, || refresh(&id));
+        assert_refresh_request(&sent);
+        let next = next.unwrap();
+        assert_eq!(next.access_token, "Atna|new");
+        assert_eq!(next.refresh_token, id.refresh_token);
+    }
+
+    #[test]
+    fn refresh_http_error_body_surfaces_code_not_tokens() {
+        let id = parse_register(&register_fixture(), &req(), 0.0).unwrap();
+        let body = serde_json::to_vec(&json!({
+            "error": "invalid_grant",
+            "error_description": "expired",
+            "access_token": "Atna|planted",
+        }))
+        .unwrap();
+        let (res, sent) = with_http(400, &body, || refresh(&id));
+        assert_refresh_request(&sent);
+        let err = format!("{:#}", res.unwrap_err());
+        assert_eq!(err, "refresh: HTTP 400: invalid_grant: expired");
+    }
+
+    #[test]
+    fn refresh_http_non_json_is_status_only() {
+        let id = parse_register(&register_fixture(), &req(), 0.0).unwrap();
+        let (res, sent) = with_http(503, b"<html>Atna|planted</html>", || refresh(&id));
+        assert_refresh_request(&sent);
+        assert_eq!(format!("{:#}", res.unwrap_err()), "refresh: HTTP 503");
+    }
 }
