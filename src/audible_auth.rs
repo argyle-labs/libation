@@ -1,0 +1,663 @@
+use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use plugin_toolkit::anyhow::{anyhow, bail, Context, Result};
+use plugin_toolkit::client::{Client, Request};
+use plugin_toolkit::serde::{Deserialize, Serialize};
+use plugin_toolkit::serde_json::{self, json, Value};
+use sha2::{Digest, Sha256};
+
+const DEVICE_TYPE: &str = "A2CZJZGLK2JJVM";
+const APP_VERSION: &str = "4.60";
+const OS_VERSION: &str = "26.2";
+const SOFTWARE_VERSION: &str = "46000856";
+const DEVICE_NAME_TEMPLATE: &str =
+    "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone";
+const AUTH_CODE_PARAM: &str = "openid.oa2.authorization_code";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "plugin_toolkit::serde", rename_all = "lowercase")]
+pub enum Marketplace {
+    Us,
+    Uk,
+    De,
+    Fr,
+    Ca,
+    It,
+    Au,
+    In,
+    Jp,
+    Es,
+    Br,
+}
+
+impl Marketplace {
+    pub fn tld(self) -> &'static str {
+        match self {
+            Self::Us => "com",
+            Self::Uk => "co.uk",
+            Self::De => "de",
+            Self::Fr => "fr",
+            Self::Ca => "ca",
+            Self::It => "it",
+            Self::Au => "com.au",
+            Self::In => "in",
+            Self::Jp => "co.jp",
+            Self::Es => "es",
+            Self::Br => "com.br",
+        }
+    }
+
+    pub fn country_code(self) -> &'static str {
+        match self {
+            Self::Us => "us",
+            Self::Uk => "uk",
+            Self::De => "de",
+            Self::Fr => "fr",
+            Self::Ca => "ca",
+            Self::It => "it",
+            Self::Au => "au",
+            Self::In => "in",
+            Self::Jp => "jp",
+            Self::Es => "es",
+            Self::Br => "br",
+        }
+    }
+
+    pub fn marketplace_id(self) -> &'static str {
+        match self {
+            Self::Us => "AF2M0KC94RCEA",
+            Self::Uk => "A2I9A3Q2GNFNGQ",
+            Self::De => "AN7V1F1VY261K",
+            Self::Fr => "A2728XDNODOQ8T",
+            Self::Ca => "A2CQZ5RBY40XE",
+            Self::It => "A2N7FU2W2BU2ZC",
+            Self::Au => "AN7EY7DTAW63G",
+            Self::In => "AJO3FBRUE6J4S",
+            Self::Jp => "A1QAP3MOU4173J",
+            Self::Es => "ALMIKO4SZCSAR",
+            Self::Br => "A10J1VAYUDTYRN",
+        }
+    }
+
+    pub fn locale(self) -> &'static str {
+        match self {
+            Self::Us => "en-US",
+            Self::Uk => "en-GB",
+            Self::De => "de-DE",
+            Self::Fr => "fr-FR",
+            Self::Ca => "en-CA",
+            Self::It => "it-IT",
+            Self::Au => "en-AU",
+            Self::In => "en-IN",
+            Self::Jp => "ja-JP",
+            Self::Es => "es-ES",
+            Self::Br => "pt-BR",
+        }
+    }
+
+    fn amazon(self) -> String {
+        format!("https://www.amazon.{}", self.tld())
+    }
+
+    fn api(self) -> String {
+        format!("https://api.amazon.{}", self.tld())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoginRequest {
+    pub marketplace: Marketplace,
+    pub device_serial: String,
+    pub client_id: String,
+    pub code_verifier: String,
+    pub code_challenge: String,
+}
+
+impl LoginRequest {
+    pub fn new(marketplace: Marketplace) -> Result<Self> {
+        let device_serial = device_serial()?;
+        let mut verifier = [0u8; 32];
+        getrandom::fill(&mut verifier).map_err(|e| anyhow!("rng: {e}"))?;
+        let code_verifier = URL_SAFE_NO_PAD.encode(verifier);
+        Ok(Self::from_parts(marketplace, device_serial, code_verifier))
+    }
+
+    fn from_parts(marketplace: Marketplace, device_serial: String, code_verifier: String) -> Self {
+        let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+        Self {
+            marketplace,
+            client_id: client_id(&device_serial),
+            device_serial,
+            code_verifier,
+            code_challenge,
+        }
+    }
+
+    pub fn login_url(&self) -> String {
+        let m = self.marketplace;
+        let client_id = format!("device:{}", self.client_id);
+        let assoc_handle = format!("amzn_audible_ios_{}", m.country_code());
+        let return_to = format!("{}/ap/maplanding", m.amazon());
+        let params: [(&str, &str); 18] = [
+            ("openid.oa2.response_type", "code"),
+            ("openid.oa2.code_challenge_method", "S256"),
+            ("openid.oa2.code_challenge", &self.code_challenge),
+            ("openid.return_to", &return_to),
+            ("openid.assoc_handle", &assoc_handle),
+            (
+                "openid.identity",
+                "http://specs.openid.net/auth/2.0/identifier_select",
+            ),
+            ("pageId", "amzn_audible_ios"),
+            ("accountStatusPolicy", "P1"),
+            (
+                "openid.claimed_id",
+                "http://specs.openid.net/auth/2.0/identifier_select",
+            ),
+            ("openid.mode", "checkid_setup"),
+            ("openid.ns.oa2", "http://www.amazon.com/ap/ext/oauth/2"),
+            ("openid.oa2.client_id", &client_id),
+            (
+                "openid.ns.pape",
+                "http://specs.openid.net/extensions/pape/1.0",
+            ),
+            ("marketPlaceId", m.marketplace_id()),
+            ("openid.oa2.scope", "device_auth_access"),
+            ("forceMobileLayout", "true"),
+            ("openid.ns", "http://specs.openid.net/auth/2.0"),
+            ("openid.pape.max_auth_age", "0"),
+        ];
+        format!("{}/ap/signin?{}", m.amazon(), form_encode(&params))
+    }
+}
+
+fn device_serial() -> Result<String> {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut out = String::with_capacity(40);
+    let mut buf = [0u8; 64];
+    while out.len() < 40 {
+        getrandom::fill(&mut buf).map_err(|e| anyhow!("rng: {e}"))?;
+        // Rejection sampling: 248 is the largest multiple of 62 below 256, so this stays unbiased.
+        for b in buf.iter().filter(|b| **b < 248) {
+            if out.len() == 40 {
+                break;
+            }
+            out.push(ALPHABET[(*b % 62) as usize] as char);
+        }
+    }
+    Ok(out)
+}
+
+fn client_id(serial: &str) -> String {
+    format!("{serial}#{DEVICE_TYPE}")
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+pub fn is_success_redirect(url: &str) -> bool {
+    url.contains("/ap/maplanding") && query_param(url, AUTH_CODE_PARAM).is_some()
+}
+
+pub fn authorization_code(url: &str) -> Result<String> {
+    query_param(url, AUTH_CODE_PARAM)
+        .ok_or_else(|| anyhow!("{AUTH_CODE_PARAM} not in redirect url"))
+}
+
+fn query_param(url: &str, key: &str) -> Option<String> {
+    let query = url.split_once('?')?.1;
+    let query = query.split('#').next().unwrap_or_default();
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        (percent_decode(k) == key).then(|| percent_decode(v))
+    })
+}
+
+fn form_encode(params: &[(&str, &str)]) -> String {
+    params
+        .iter()
+        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => match bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                Some(v) => {
+                    out.push(v);
+                    i += 2;
+                }
+                None => out.push(b'%'),
+            },
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(crate = "plugin_toolkit::serde")]
+pub struct Identity {
+    pub access_token: String,
+    /// Unix seconds.
+    pub access_expires: f64,
+    pub refresh_token: String,
+    pub adp_token: String,
+    pub device_private_key: String,
+    pub website_cookies: BTreeMap<String, String>,
+    pub store_authentication_cookie: Option<String>,
+    pub device_serial: String,
+    pub customer_id: String,
+    pub device_name: String,
+    pub marketplace: Marketplace,
+}
+
+impl Identity {
+    /// The mkb79 `Authenticator.to_dict()` shape, which `LibationCli import-account` reads via `Mkb79Auth`.
+    pub fn to_audible_cli_json(&self) -> Value {
+        let website_cookies = if self.website_cookies.is_empty() {
+            Value::Null
+        } else {
+            json!(self.website_cookies)
+        };
+        json!({
+            "website_cookies": website_cookies,
+            "adp_token": self.adp_token,
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+            "device_private_key": self.device_private_key,
+            "store_authentication_cookie": self
+                .store_authentication_cookie
+                .as_ref()
+                .map(|c| json!({ "cookie": c })),
+            "device_info": {
+                "device_name": self.device_name,
+                "device_serial_number": self.device_serial,
+                "device_type": DEVICE_TYPE,
+            },
+            "customer_info": { "user_id": self.customer_id },
+            "expires": self.access_expires,
+            "locale_code": self.marketplace.country_code(),
+            "with_username": false,
+            "activation_bytes": null,
+        })
+    }
+}
+
+fn now_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or_default()
+}
+
+fn register_body(code: &str, req: &LoginRequest) -> Value {
+    json!({
+        "requested_token_type": [
+            "bearer",
+            "mac_dms",
+            "website_cookies",
+            "store_authentication_cookie",
+        ],
+        "cookies": { "website_cookies": [], "domain": format!(".amazon.{}", req.marketplace.tld()) },
+        "registration_data": {
+            "domain": "Device",
+            "app_version": APP_VERSION,
+            "device_serial": req.device_serial,
+            "device_type": DEVICE_TYPE,
+            "device_name": DEVICE_NAME_TEMPLATE,
+            "os_version": OS_VERSION,
+            "software_version": SOFTWARE_VERSION,
+            "device_model": "iPhone",
+            "app_name": "Audible",
+        },
+        "auth_data": {
+            "client_id": req.client_id,
+            "authorization_code": code,
+            "code_verifier": req.code_verifier,
+            "code_algorithm": "SHA-256",
+            "client_domain": "DeviceLegacy",
+        },
+        "requested_extensions": ["device_info", "customer_info"],
+    })
+}
+
+fn str_at<'a>(v: &'a Value, path: &[&str]) -> Result<&'a str> {
+    path.iter()
+        .try_fold(v, |acc, k| acc.get(k))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("register response missing {}", path.join(".")))
+}
+
+fn expires_in(v: &Value) -> Result<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow!("invalid expires_in: {v}"))
+}
+
+fn parse_register(body: &Value, req: &LoginRequest, now: f64) -> Result<Identity> {
+    let success = body
+        .pointer("/response/success")
+        .ok_or_else(|| anyhow!("register failed: {body}"))?;
+    let tokens = &success["tokens"];
+    let expires = expires_in(&tokens["bearer"]["expires_in"])?;
+    let website_cookies = tokens["website_cookies"]
+        .as_array()
+        .map(|cookies| {
+            cookies
+                .iter()
+                .filter_map(|c| {
+                    Some((
+                        c["Name"].as_str()?.to_string(),
+                        c["Value"].as_str()?.replace('"', ""),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let store_authentication_cookie = tokens["store_authentication_cookie"]["cookie"]
+        .as_str()
+        .map(str::to_string);
+    let device_info = &success["extensions"]["device_info"];
+    Ok(Identity {
+        access_token: str_at(tokens, &["bearer", "access_token"])?.to_string(),
+        access_expires: now + expires,
+        refresh_token: str_at(tokens, &["bearer", "refresh_token"])?.to_string(),
+        adp_token: str_at(tokens, &["mac_dms", "adp_token"])?.to_string(),
+        device_private_key: str_at(tokens, &["mac_dms", "device_private_key"])?.to_string(),
+        website_cookies,
+        store_authentication_cookie,
+        device_serial: device_info["device_serial_number"]
+            .as_str()
+            .unwrap_or(&req.device_serial)
+            .to_string(),
+        customer_id: str_at(&success["extensions"], &["customer_info", "user_id"])?.to_string(),
+        device_name: device_info["device_name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        marketplace: req.marketplace,
+    })
+}
+
+pub fn register(code: &str, req: &LoginRequest) -> Result<Identity> {
+    let url = format!("{}/auth/register", req.marketplace.api());
+    let resp = Client::new().post_json(url, &register_body(code, req))?;
+    let body: Value = resp
+        .json()
+        .with_context(|| format!("register: HTTP {}", resp.status))?;
+    if !resp.is_success() {
+        bail!("register: HTTP {}: {body}", resp.status);
+    }
+    parse_register(&body, req, now_secs())
+}
+
+fn refresh_body(identity: &Identity) -> String {
+    form_encode(&[
+        ("app_name", "Audible"),
+        ("app_version", APP_VERSION),
+        ("source_token", &identity.refresh_token),
+        ("requested_token_type", "access_token"),
+        ("source_token_type", "refresh_token"),
+    ])
+}
+
+fn apply_refresh(identity: &Identity, body: &Value, now: f64) -> Result<Identity> {
+    let access_token = body["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("token response missing access_token"))?;
+    Ok(Identity {
+        access_token: access_token.to_string(),
+        access_expires: now + expires_in(&body["expires_in"])?,
+        ..identity.clone()
+    })
+}
+
+pub fn refresh(identity: &Identity) -> Result<Identity> {
+    let url = format!("{}/auth/token", identity.marketplace.api());
+    let req = Request::new("POST", url)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(refresh_body(identity));
+    let resp = Client::new().send(req)?;
+    if !resp.is_success() {
+        bail!("refresh: HTTP {}: {}", resp.status, resp.text());
+    }
+    let body: Value = serde_json::from_slice(&resp.body).context("refresh: invalid json")?;
+    apply_refresh(identity, &body, now_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req() -> LoginRequest {
+        LoginRequest::from_parts(
+            Marketplace::Uk,
+            "ABCdef0123456789ABCdef0123456789ABCdef01".into(),
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
+        )
+    }
+
+    fn register_fixture() -> Value {
+        json!({
+            "response": { "success": {
+                "tokens": {
+                    "bearer": { "access_token": "Atna|at", "refresh_token": "Atnr|rt", "expires_in": "3600" },
+                    "mac_dms": { "adp_token": "{enc:x}", "device_private_key": "MIIEpk" },
+                    "website_cookies": [
+                        { "Name": "session-id", "Value": "\"123-456\"" },
+                        { "Name": "ubid-acbuk", "Value": "789" }
+                    ],
+                    "store_authentication_cookie": { "cookie": "sac" }
+                },
+                "extensions": {
+                    "device_info": {
+                        "device_name": "Scott's Audible for iPhone",
+                        "device_serial_number": "ABCdef0123456789ABCdef0123456789ABCdef01",
+                        "device_type": "A2CZJZGLK2JJVM"
+                    },
+                    "customer_info": { "user_id": "amzn1.account.X", "given_name": "Scott" }
+                }
+            }}
+        })
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_vector() {
+        assert_eq!(
+            req().code_challenge,
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn client_id_is_hex_of_serial_and_device_type() {
+        assert_eq!(client_id("AB"), "4142234132435a4a5a474c4b324a4a564d");
+    }
+
+    #[test]
+    fn generated_request_shape() {
+        let r = LoginRequest::new(Marketplace::Us).unwrap();
+        assert_eq!(r.device_serial.len(), 40);
+        assert!(r.device_serial.bytes().all(|b| b.is_ascii_alphanumeric()));
+        assert_eq!(r.code_verifier.len(), 43);
+    }
+
+    #[test]
+    fn login_url_params() {
+        let r = req();
+        let url = r.login_url();
+        assert!(url.starts_with("https://www.amazon.co.uk/ap/signin?"));
+        let p = |k| query_param(&url, k).unwrap();
+        assert_eq!(p("openid.oa2.response_type"), "code");
+        assert_eq!(p("openid.oa2.code_challenge_method"), "S256");
+        assert_eq!(p("openid.oa2.code_challenge"), r.code_challenge);
+        assert_eq!(p("openid.oa2.client_id"), format!("device:{}", r.client_id));
+        assert_eq!(p("openid.oa2.scope"), "device_auth_access");
+        assert_eq!(
+            p("openid.return_to"),
+            "https://www.amazon.co.uk/ap/maplanding"
+        );
+        assert_eq!(p("openid.assoc_handle"), "amzn_audible_ios_uk");
+        assert_eq!(p("pageId"), "amzn_audible_ios");
+        assert_eq!(p("accountStatusPolicy"), "P1");
+        assert_eq!(
+            p("openid.identity"),
+            "http://specs.openid.net/auth/2.0/identifier_select"
+        );
+        assert_eq!(
+            p("openid.claimed_id"),
+            "http://specs.openid.net/auth/2.0/identifier_select"
+        );
+        assert_eq!(p("openid.mode"), "checkid_setup");
+        assert_eq!(p("openid.ns"), "http://specs.openid.net/auth/2.0");
+        assert_eq!(p("openid.ns.oa2"), "http://www.amazon.com/ap/ext/oauth/2");
+        assert_eq!(
+            p("openid.ns.pape"),
+            "http://specs.openid.net/extensions/pape/1.0"
+        );
+        assert_eq!(p("openid.pape.max_auth_age"), "0");
+        assert_eq!(p("marketPlaceId"), "A2I9A3Q2GNFNGQ");
+        assert_eq!(p("forceMobileLayout"), "true");
+    }
+
+    #[test]
+    fn code_extraction() {
+        let ok = "https://www.amazon.com/ap/maplanding?openid.assoc_handle=x&openid.oa2.authorization_code=ANabc%2Bdef&openid.mode=id_res";
+        assert!(is_success_redirect(ok));
+        assert_eq!(authorization_code(ok).unwrap(), "ANabc+def");
+        let signin = "https://www.amazon.com/ap/signin?openid.mode=checkid_setup";
+        assert!(!is_success_redirect(signin));
+        assert!(authorization_code(signin).is_err());
+    }
+
+    #[test]
+    fn register_body_matches_mkb79() {
+        let b = register_body("CODE", &req());
+        assert_eq!(b["cookies"]["domain"], ".amazon.co.uk");
+        assert_eq!(b["auth_data"]["client_id"], req().client_id);
+        assert_eq!(b["auth_data"]["authorization_code"], "CODE");
+        assert_eq!(b["auth_data"]["code_verifier"], req().code_verifier);
+        assert_eq!(b["auth_data"]["code_algorithm"], "SHA-256");
+        assert_eq!(b["auth_data"]["client_domain"], "DeviceLegacy");
+        assert_eq!(b["registration_data"]["device_serial"], req().device_serial);
+        assert_eq!(
+            b["requested_extensions"],
+            json!(["device_info", "customer_info"])
+        );
+    }
+
+    #[test]
+    fn parses_register_response() {
+        let id = parse_register(&register_fixture(), &req(), 1000.0).unwrap();
+        assert_eq!(id.access_token, "Atna|at");
+        assert_eq!(id.access_expires, 4600.0);
+        assert_eq!(id.refresh_token, "Atnr|rt");
+        assert_eq!(id.adp_token, "{enc:x}");
+        assert_eq!(id.device_private_key, "MIIEpk");
+        assert_eq!(id.website_cookies["session-id"], "123-456");
+        assert_eq!(id.store_authentication_cookie.as_deref(), Some("sac"));
+        assert_eq!(id.customer_id, "amzn1.account.X");
+        assert_eq!(id.device_name, "Scott's Audible for iPhone");
+        assert_eq!(id.marketplace, Marketplace::Uk);
+    }
+
+    #[test]
+    fn register_error_surfaces() {
+        let err = parse_register(
+            &json!({"response": {"error": {"code": "InvalidValue"}}}),
+            &req(),
+            0.0,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn refresh_replaces_access_token_only() {
+        let id = parse_register(&register_fixture(), &req(), 0.0).unwrap();
+        assert_eq!(
+            refresh_body(&id),
+            "app_name=Audible&app_version=4.60&source_token=Atnr%7Crt&requested_token_type=access_token&source_token_type=refresh_token"
+        );
+        let next = apply_refresh(
+            &id,
+            &json!({"access_token": "Atna|new", "expires_in": 3600}),
+            50.0,
+        )
+        .unwrap();
+        assert_eq!(next.access_token, "Atna|new");
+        assert_eq!(next.access_expires, 3650.0);
+        assert_eq!(next.refresh_token, id.refresh_token);
+    }
+
+    #[test]
+    fn audible_cli_json_shape() {
+        let id = parse_register(&register_fixture(), &req(), 1000.0).unwrap();
+        let j = id.to_audible_cli_json();
+        let mut keys: Vec<_> = j.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "access_token",
+                "activation_bytes",
+                "adp_token",
+                "customer_info",
+                "device_info",
+                "device_private_key",
+                "expires",
+                "locale_code",
+                "refresh_token",
+                "store_authentication_cookie",
+                "website_cookies",
+                "with_username",
+            ]
+        );
+        assert_eq!(j["locale_code"], "uk");
+        assert_eq!(j["with_username"], false);
+        assert_eq!(j["expires"], 4600.0);
+        assert_eq!(j["store_authentication_cookie"], json!({"cookie": "sac"}));
+        assert_eq!(j["website_cookies"]["session-id"], "123-456");
+        assert_eq!(j["device_info"]["device_serial_number"], id.device_serial);
+        assert_eq!(j["device_info"]["device_type"], "A2CZJZGLK2JJVM");
+        assert_eq!(j["customer_info"]["user_id"], "amzn1.account.X");
+    }
+
+    #[test]
+    fn percent_round_trip() {
+        let s = "a b/c?d=e&f|g~h";
+        assert_eq!(percent_decode(&percent_encode(s)), s);
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+    }
+}

@@ -17,7 +17,10 @@ name = "libation"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
+getrandom = "0.4"
 plugin-toolkit = { version = ">=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db"] }
+sha2 = "0.10"
 
 [lints.clippy]
 let_underscore_must_use = "deny"
