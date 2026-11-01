@@ -107,16 +107,31 @@ impl Marketplace {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoginRequest {
     pub marketplace: Marketplace,
     pub device_serial: String,
     pub client_id: String,
-    pub code_verifier: String,
+    code_verifier: String,
     pub code_challenge: String,
 }
 
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRequest")
+            .field("marketplace", &self.marketplace)
+            .field("device_serial", &self.device_serial)
+            .field("client_id", &self.client_id)
+            .field("code_challenge", &self.code_challenge)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LoginRequest {
+    pub(crate) fn code_verifier(&self) -> &str {
+        &self.code_verifier
+    }
+
     pub fn new(marketplace: Marketplace) -> Result<Self> {
         let device_serial = device_serial()?;
         let mut verifier = [0u8; 32];
@@ -263,7 +278,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(crate = "plugin_toolkit::serde")]
 pub struct Identity {
     pub access_token: String,
@@ -278,6 +293,25 @@ pub struct Identity {
     pub customer_id: String,
     pub device_name: String,
     pub marketplace: Marketplace,
+}
+
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const R: &str = "<redacted>";
+        f.debug_struct("Identity")
+            .field("access_token", &R)
+            .field("access_expires", &self.access_expires)
+            .field("refresh_token", &R)
+            .field("adp_token", &R)
+            .field("device_private_key", &R)
+            .field("website_cookies", &R)
+            .field("store_authentication_cookie", &R)
+            .field("device_serial", &self.device_serial)
+            .field("customer_id", &self.customer_id)
+            .field("device_name", &R)
+            .field("marketplace", &self.marketplace)
+            .finish()
+    }
 }
 
 impl Identity {
@@ -342,7 +376,7 @@ fn register_body(code: &str, req: &LoginRequest) -> Value {
         "auth_data": {
             "client_id": req.client_id,
             "authorization_code": code,
-            "code_verifier": req.code_verifier,
+            "code_verifier": req.code_verifier(),
             "code_algorithm": "SHA-256",
             "client_domain": "DeviceLegacy",
         },
@@ -511,7 +545,7 @@ mod tests {
         let r = LoginRequest::new(Marketplace::Us).unwrap();
         assert_eq!(r.device_serial.len(), 40);
         assert!(r.device_serial.bytes().all(|b| b.is_ascii_alphanumeric()));
-        assert_eq!(r.code_verifier.len(), 43);
+        assert_eq!(r.code_verifier().len(), 43);
     }
 
     #[test]
@@ -568,7 +602,7 @@ mod tests {
         assert_eq!(b["cookies"]["domain"], ".amazon.co.uk");
         assert_eq!(b["auth_data"]["client_id"], req().client_id);
         assert_eq!(b["auth_data"]["authorization_code"], "CODE");
-        assert_eq!(b["auth_data"]["code_verifier"], req().code_verifier);
+        assert_eq!(b["auth_data"]["code_verifier"], req().code_verifier());
         assert_eq!(b["auth_data"]["code_algorithm"], "SHA-256");
         assert_eq!(b["auth_data"]["client_domain"], "DeviceLegacy");
         assert_eq!(b["registration_data"]["device_serial"], req().device_serial);
@@ -659,5 +693,27 @@ mod tests {
         let s = "a b/c?d=e&f|g~h";
         assert_eq!(percent_decode(&percent_encode(s)), s);
         assert_eq!(percent_decode("bad%2"), "bad%2");
+    }
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let r = format!("{:?}", req());
+        assert!(!r.contains("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"));
+        let id = format!(
+            "{:?}",
+            parse_register(&register_fixture(), &req(), 1000.0).unwrap()
+        );
+        for secret in [
+            "Atna|at",
+            "Atnr|rt",
+            "{enc:x}",
+            "MIIEpk",
+            "123-456",
+            "ubid-acbuk",
+            "sac",
+        ] {
+            assert!(!id.contains(secret), "{secret} leaked: {id}");
+        }
+        assert!(id.contains("amzn1.account.X"));
     }
 }
