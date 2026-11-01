@@ -190,6 +190,27 @@ impl LoginRequest {
     }
 }
 
+impl LoginRequest {
+    pub fn is_success_redirect(&self, url: &str) -> bool {
+        self.authorization_code(url).is_ok()
+    }
+
+    pub fn authorization_code(&self, url: &str) -> Result<String> {
+        self.maplanding_query(url)
+            .and_then(|q| query_param(q, AUTH_CODE_PARAM))
+            .ok_or_else(|| anyhow!("{AUTH_CODE_PARAM} not in maplanding redirect url"))
+    }
+
+    // Exact base match pins scheme, host, port and path; the fragment is never parsed.
+    fn maplanding_query<'a>(&self, url: &'a str) -> Option<&'a str> {
+        let (base, rest) = url.split_once('?')?;
+        if base != format!("{}/ap/maplanding", self.marketplace.amazon()) {
+            return None;
+        }
+        rest.split('#').next()
+    }
+}
+
 fn device_serial() -> Result<String> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut out = String::with_capacity(40);
@@ -214,10 +235,6 @@ fn client_id(serial: &str) -> String {
         .collect()
 }
 
-pub fn is_success_redirect(url: &str) -> bool {
-    url.contains("/ap/maplanding") && query_param(url, AUTH_CODE_PARAM).is_some()
-}
-
 fn query_string(params: &[(&str, &str)]) -> String {
     let owned: Vec<(String, String)> = params
         .iter()
@@ -226,14 +243,7 @@ fn query_string(params: &[(&str, &str)]) -> String {
     url::query_string(&owned)
 }
 
-pub fn authorization_code(url: &str) -> Result<String> {
-    query_param(url, AUTH_CODE_PARAM)
-        .ok_or_else(|| anyhow!("{AUTH_CODE_PARAM} not in redirect url"))
-}
-
-fn query_param(url: &str, key: &str) -> Option<String> {
-    let query = url.split_once('?')?.1;
-    let query = query.split('#').next().unwrap_or_default();
+fn query_param(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         (url::decode(k).ok()? == key).then(|| url::decode(v).ok())?
@@ -557,7 +567,7 @@ mod tests {
         let r = req();
         let url = r.login_url();
         assert!(url.starts_with("https://www.amazon.co.uk/ap/signin?"));
-        let p = |k| query_param(&url, k).unwrap();
+        let p = |k| query_param(url.split_once('?').unwrap().1, k).unwrap();
         assert_eq!(p("openid.oa2.response_type"), "code");
         assert_eq!(p("openid.oa2.code_challenge_method"), "S256");
         assert_eq!(p("openid.oa2.code_challenge"), r.code_challenge);
@@ -593,11 +603,25 @@ mod tests {
     #[test]
     fn code_extraction() {
         let ok = "https://www.amazon.com/ap/maplanding?openid.assoc_handle=x&openid.oa2.authorization_code=ANabc%2Bdef&openid.mode=id_res";
-        assert!(is_success_redirect(ok));
-        assert_eq!(authorization_code(ok).unwrap(), "ANabc+def");
+        let r = LoginRequest::from_parts(Marketplace::Us, "S".into(), "V".into());
+        assert!(r.is_success_redirect(ok));
+        assert_eq!(r.authorization_code(ok).unwrap(), "ANabc+def");
         let signin = "https://www.amazon.com/ap/signin?openid.mode=checkid_setup";
-        assert!(!is_success_redirect(signin));
-        assert!(authorization_code(signin).is_err());
+        assert!(!r.is_success_redirect(signin));
+        assert!(r.authorization_code(signin).is_err());
+        for bad in [
+            "https://evil.example/x?y=/ap/maplanding&openid.oa2.authorization_code=Z",
+            "https://www.amazon.com.evil.example/ap/maplanding?openid.oa2.authorization_code=Z",
+            "https://www.amazon.co.uk/ap/maplanding?openid.oa2.authorization_code=Z",
+            "https://www.amazon.com/x/ap/maplanding?openid.oa2.authorization_code=Z",
+            "https://www.amazon.com/ap/maplanding/x?openid.oa2.authorization_code=Z",
+            "http://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=Z",
+            "https://www.amazon.com/ap/maplanding?openid.mode=id_res#openid.oa2.authorization_code=Z",
+            "https://www.amazon.com/ap/maplanding#?openid.oa2.authorization_code=Z",
+        ] {
+            assert!(!r.is_success_redirect(bad), "{bad}");
+            assert!(r.authorization_code(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
