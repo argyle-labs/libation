@@ -427,7 +427,7 @@ fn parse_register(body: &Value, req: &LoginRequest, now: f64) -> Result<Identity
     let store_authentication_cookie = tokens["store_authentication_cookie"]["cookie"]
         .as_str()
         .map(str::to_string);
-    let device_info = &success["extensions"]["device_info"];
+    let extensions = &success["extensions"];
     Ok(Identity {
         access_token: str_at(tokens, &["bearer", "access_token"])?.to_string(),
         access_expires: now + expires,
@@ -436,15 +436,9 @@ fn parse_register(body: &Value, req: &LoginRequest, now: f64) -> Result<Identity
         device_private_key: str_at(tokens, &["mac_dms", "device_private_key"])?.to_string(),
         website_cookies,
         store_authentication_cookie,
-        device_serial: device_info["device_serial_number"]
-            .as_str()
-            .unwrap_or(&req.device_serial)
-            .to_string(),
-        customer_id: str_at(&success["extensions"], &["customer_info", "user_id"])?.to_string(),
-        device_name: device_info["device_name"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        device_serial: str_at(extensions, &["device_info", "device_serial_number"])?.to_string(),
+        customer_id: str_at(extensions, &["customer_info", "user_id"])?.to_string(),
+        device_name: str_at(extensions, &["device_info", "device_name"])?.to_string(),
         marketplace: req.marketplace,
     })
 }
@@ -653,6 +647,22 @@ mod tests {
         assert_eq!(id.customer_id, "amzn1.account.X");
         assert_eq!(id.device_name, "Scott's Audible for iPhone");
         assert_eq!(id.marketplace, Marketplace::Uk);
+    }
+
+    #[test]
+    fn register_requires_device_info_fields() {
+        for field in ["device_name", "device_serial_number"] {
+            let mut body = register_fixture();
+            body["response"]["success"]["extensions"]["device_info"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let err = parse_register(&body, &req(), 0.0).unwrap_err().to_string();
+            assert_eq!(
+                err,
+                format!("register response missing device_info.{field}")
+            );
+        }
     }
 
     #[test]
