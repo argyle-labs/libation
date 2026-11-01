@@ -563,10 +563,12 @@ mod tests {
     }
 
     fn username_req() -> LoginRequest {
-        LoginRequest {
-            with_username: true,
-            ..req()
-        }
+        LoginRequest::from_parts(
+            Marketplace::Uk,
+            true,
+            "ABCdef0123456789ABCdef0123456789ABCdef01".into(),
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
+        )
     }
 
     fn register_fixture() -> Value {
