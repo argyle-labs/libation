@@ -99,7 +99,7 @@ impl Marketplace {
         }
     }
 
-    /// mkb79 `build_oauth_url` allows Audible-username (pre-Amazon) sign-in only on these.
+    /// mkb79 login.py build_oauth_url restricts username sign-in to these.
     pub fn supports_username_login(self) -> bool {
         matches!(self, Self::Us | Self::Uk | Self::De)
     }
