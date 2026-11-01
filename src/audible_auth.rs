@@ -7,6 +7,7 @@ use plugin_toolkit::anyhow::{anyhow, bail, Context, Result};
 use plugin_toolkit::client::{Client, Request};
 use plugin_toolkit::serde::{Deserialize, Serialize};
 use plugin_toolkit::serde_json::{self, json, Value};
+use plugin_toolkit::url;
 use sha2::{Digest, Sha256};
 
 const DEVICE_TYPE: &str = "A2CZJZGLK2JJVM";
@@ -185,7 +186,7 @@ impl LoginRequest {
             ("openid.ns", "http://specs.openid.net/auth/2.0"),
             ("openid.pape.max_auth_age", "0"),
         ];
-        format!("{}/ap/signin?{}", m.amazon(), form_encode(&params))
+        format!("{}/ap/signin?{}", m.amazon(), query_string(&params))
     }
 }
 
@@ -217,6 +218,14 @@ pub fn is_success_redirect(url: &str) -> bool {
     url.contains("/ap/maplanding") && query_param(url, AUTH_CODE_PARAM).is_some()
 }
 
+fn query_string(params: &[(&str, &str)]) -> String {
+    let owned: Vec<(String, String)> = params
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    url::query_string(&owned)
+}
+
 pub fn authorization_code(url: &str) -> Result<String> {
     query_param(url, AUTH_CODE_PARAM)
         .ok_or_else(|| anyhow!("{AUTH_CODE_PARAM} not in redirect url"))
@@ -227,55 +236,8 @@ fn query_param(url: &str, key: &str) -> Option<String> {
     let query = query.split('#').next().unwrap_or_default();
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        (percent_decode(k) == key).then(|| percent_decode(v))
+        (url::decode(k).ok()? == key).then(|| url::decode(v).ok())?
     })
-}
-
-fn form_encode(params: &[(&str, &str)]) -> String {
-    params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => out.push(b' '),
-            b'%' => match bytes
-                .get(i + 1..i + 3)
-                .and_then(|h| std::str::from_utf8(h).ok())
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-            {
-                Some(v) => {
-                    out.push(v);
-                    i += 2;
-                }
-                None => out.push(b'%'),
-            },
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -493,7 +455,7 @@ pub fn register(code: &str, req: &LoginRequest) -> Result<Identity> {
 }
 
 fn refresh_body(identity: &Identity) -> String {
-    form_encode(&[
+    query_string(&[
         ("app_name", "Audible"),
         ("app_version", APP_VERSION),
         ("source_token", &identity.refresh_token),
@@ -748,13 +710,6 @@ mod tests {
         assert_eq!(j["device_info"]["device_serial_number"], id.device_serial);
         assert_eq!(j["device_info"]["device_type"], "A2CZJZGLK2JJVM");
         assert_eq!(j["customer_info"]["user_id"], "amzn1.account.X");
-    }
-
-    #[test]
-    fn percent_round_trip() {
-        let s = "a b/c?d=e&f|g~h";
-        assert_eq!(percent_decode(&percent_encode(s)), s);
-        assert_eq!(percent_decode("bad%2"), "bad%2");
     }
 
     #[test]
