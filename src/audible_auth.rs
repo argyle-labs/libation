@@ -318,11 +318,10 @@ impl Identity {
     }
 }
 
-fn now_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+fn secs_since_epoch(t: SystemTime) -> Result<f64> {
+    t.duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
-        .unwrap_or_default()
+        .map_err(|_| anyhow!("system clock is before the unix epoch"))
 }
 
 fn register_body(code: &str, req: &LoginRequest) -> Value {
@@ -455,7 +454,7 @@ pub fn register(code: &str, req: &LoginRequest) -> Result<Identity> {
             None => bail!("register: HTTP {}", resp.status),
         }
     }
-    parse_register(&body, req, now_secs())
+    parse_register(&body, req, secs_since_epoch(SystemTime::now())?)
 }
 
 fn refresh_body(identity: &Identity) -> String {
@@ -496,7 +495,7 @@ pub fn refresh(identity: &Identity) -> Result<Identity> {
         }
     }
     let body: Value = serde_json::from_slice(&resp.body).context("refresh: invalid json")?;
-    apply_refresh(identity, &body, now_secs())
+    apply_refresh(identity, &body, secs_since_epoch(SystemTime::now())?)
 }
 
 #[cfg(test)]
@@ -766,6 +765,16 @@ mod tests {
             assert!(!id.contains(secret), "{secret} leaked: {id}");
         }
         assert!(id.contains("amzn1.account.X"));
+    }
+
+    #[test]
+    fn secs_since_epoch_rejects_pre_epoch_clock() {
+        use std::time::Duration;
+        assert_eq!(
+            secs_since_epoch(UNIX_EPOCH + Duration::from_secs(1_700_000_000)).unwrap(),
+            1_700_000_000.0
+        );
+        assert!(secs_since_epoch(UNIX_EPOCH - Duration::from_secs(1)).is_err());
     }
 
     #[test]
