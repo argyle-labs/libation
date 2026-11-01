@@ -1,5 +1,6 @@
 #![allow(clippy::disallowed_types)]
 
+pub mod audible_auth;
 pub mod tools;
 
 use plugin_toolkit::clap;

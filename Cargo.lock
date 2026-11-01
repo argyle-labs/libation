@@ -494,7 +494,10 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "libation"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "getrandom 0.4.3",
  "orca-plugin-toolkit",
+ "sha2 0.10.9",
 ]
 
 [[package]]
