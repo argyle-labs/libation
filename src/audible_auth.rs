@@ -393,10 +393,12 @@ fn str_at<'a>(v: &'a Value, path: &[&str]) -> Result<&'a str> {
 
 fn expires_in(v: &Value) -> Result<f64> {
     match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.parse::<u64>().ok(),
         _ => None,
     }
+    .filter(|&n| n > 0)
+    .map(|n| n as f64)
     .ok_or_else(|| anyhow!("invalid expires_in: {v}"))
 }
 
@@ -775,5 +777,23 @@ mod tests {
             assert!(!id.contains(secret), "{secret} leaked: {id}");
         }
         assert!(id.contains("amzn1.account.X"));
+    }
+
+    #[test]
+    fn expires_in_accepts_only_positive_integers() {
+        for bad in [
+            json!("NaN"),
+            json!("inf"),
+            json!("-1"),
+            json!("3600.5"),
+            json!("0"),
+            json!(0),
+            json!(-1),
+            json!(3600.5),
+        ] {
+            assert!(expires_in(&bad).is_err(), "{bad} accepted");
+        }
+        assert_eq!(expires_in(&json!("3600")).unwrap(), 3600.0);
+        assert_eq!(expires_in(&json!(3600)).unwrap(), 3600.0);
     }
 }
