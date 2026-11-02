@@ -99,18 +99,32 @@ impl Marketplace {
         }
     }
 
-    fn amazon(self) -> String {
-        format!("https://www.amazon.{}", self.tld())
+    /// mkb79 login.py build_oauth_url restricts username sign-in to these.
+    pub fn supports_username_login(self) -> bool {
+        matches!(self, Self::Us | Self::Uk | Self::De)
     }
 
-    fn api(self) -> String {
-        format!("https://api.amazon.{}", self.tld())
+    fn www(self, with_username: bool) -> String {
+        format!("https://www.{}.{}", brand(with_username), self.tld())
+    }
+
+    fn api(self, with_username: bool) -> String {
+        format!("https://api.{}.{}", brand(with_username), self.tld())
+    }
+}
+
+fn brand(with_username: bool) -> &'static str {
+    if with_username {
+        "audible"
+    } else {
+        "amazon"
     }
 }
 
 #[derive(Clone)]
 pub struct LoginRequest {
     pub marketplace: Marketplace,
+    pub with_username: bool,
     pub device_serial: String,
     pub client_id: String,
     code_verifier: String,
@@ -121,6 +135,7 @@ impl std::fmt::Debug for LoginRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoginRequest")
             .field("marketplace", &self.marketplace)
+            .field("with_username", &self.with_username)
             .field("device_serial", &self.device_serial)
             .field("client_id", &self.client_id)
             .field("code_challenge", &self.code_challenge)
@@ -133,18 +148,35 @@ impl LoginRequest {
         &self.code_verifier
     }
 
-    pub fn new(marketplace: Marketplace) -> Result<Self> {
+    pub fn new(marketplace: Marketplace, with_username: bool) -> Result<Self> {
+        if with_username && !marketplace.supports_username_login() {
+            bail!(
+                "Audible username login is only supported for the us, uk and de marketplaces, not {}",
+                marketplace.country_code()
+            );
+        }
         let device_serial = device_serial()?;
         let mut verifier = [0u8; 32];
         getrandom::fill(&mut verifier).map_err(|e| anyhow!("rng: {e}"))?;
         let code_verifier = URL_SAFE_NO_PAD.encode(verifier);
-        Ok(Self::from_parts(marketplace, device_serial, code_verifier))
+        Ok(Self::from_parts(
+            marketplace,
+            with_username,
+            device_serial,
+            code_verifier,
+        ))
     }
 
-    fn from_parts(marketplace: Marketplace, device_serial: String, code_verifier: String) -> Self {
+    fn from_parts(
+        marketplace: Marketplace,
+        with_username: bool,
+        device_serial: String,
+        code_verifier: String,
+    ) -> Self {
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
         Self {
             marketplace,
+            with_username,
             client_id: client_id(&device_serial),
             device_serial,
             code_verifier,
@@ -155,8 +187,14 @@ impl LoginRequest {
     pub fn login_url(&self) -> String {
         let m = self.marketplace;
         let client_id = format!("device:{}", self.client_id);
-        let assoc_handle = format!("amzn_audible_ios_{}", m.country_code());
-        let return_to = format!("{}/ap/maplanding", m.amazon());
+        let www = m.www(self.with_username);
+        let (assoc_prefix, page_id) = if self.with_username {
+            ("amzn_audible_ios_lap", "amzn_audible_ios_privatepool")
+        } else {
+            ("amzn_audible_ios", "amzn_audible_ios")
+        };
+        let assoc_handle = format!("{assoc_prefix}_{}", m.country_code());
+        let return_to = format!("{www}/ap/maplanding");
         let params: [(&str, &str); 18] = [
             ("openid.oa2.response_type", "code"),
             ("openid.oa2.code_challenge_method", "S256"),
@@ -167,7 +205,7 @@ impl LoginRequest {
                 "openid.identity",
                 "http://specs.openid.net/auth/2.0/identifier_select",
             ),
-            ("pageId", "amzn_audible_ios"),
+            ("pageId", page_id),
             ("accountStatusPolicy", "P1"),
             (
                 "openid.claimed_id",
@@ -186,7 +224,7 @@ impl LoginRequest {
             ("openid.ns", "http://specs.openid.net/auth/2.0"),
             ("openid.pape.max_auth_age", "0"),
         ];
-        format!("{}/ap/signin?{}", m.amazon(), query_string(&params))
+        format!("{www}/ap/signin?{}", query_string(&params))
     }
 }
 
@@ -204,7 +242,7 @@ impl LoginRequest {
     // Exact base match pins scheme, host, port and path; the fragment is never parsed.
     fn maplanding_query<'a>(&self, url: &'a str) -> Option<&'a str> {
         let (base, rest) = url.split_once('?')?;
-        if base != format!("{}/ap/maplanding", self.marketplace.amazon()) {
+        if base != format!("{}/ap/maplanding", self.marketplace.www(self.with_username)) {
             return None;
         }
         rest.split('#').next()
@@ -265,6 +303,8 @@ pub struct Identity {
     pub customer_id: String,
     pub device_name: String,
     pub marketplace: Marketplace,
+    #[serde(default)]
+    pub with_username: bool,
 }
 
 impl std::fmt::Debug for Identity {
@@ -282,6 +322,7 @@ impl std::fmt::Debug for Identity {
             .field("customer_id", &self.customer_id)
             .field("device_name", &R)
             .field("marketplace", &self.marketplace)
+            .field("with_username", &self.with_username)
             .finish()
     }
 }
@@ -316,7 +357,7 @@ impl Identity {
             "customer_info": { "user_id": self.customer_id },
             "expires": self.access_expires,
             "locale_code": self.marketplace.country_code(),
-            "with_username": false,
+            "with_username": self.with_username,
             "activation_bytes": null,
         })
     }
@@ -445,11 +486,12 @@ fn parse_register(body: &Value, req: &LoginRequest, now: f64) -> Result<Identity
         customer_id: str_at(extensions, &["customer_info", "user_id"])?.to_string(),
         device_name: str_at(extensions, &["device_info", "device_name"])?.to_string(),
         marketplace: req.marketplace,
+        with_username: req.with_username,
     })
 }
 
 pub fn register(code: &str, req: &LoginRequest) -> Result<Identity> {
-    let url = format!("{}/auth/register", req.marketplace.api());
+    let url = format!("{}/auth/register", req.marketplace.api(req.with_username));
     let resp = Client::new().post_json(url, &register_body(code, req))?;
     let body: Value = resp
         .json()
@@ -485,7 +527,10 @@ fn apply_refresh(identity: &Identity, body: &Value, now: f64) -> Result<Identity
 }
 
 pub fn refresh(identity: &Identity) -> Result<Identity> {
-    let url = format!("{}/auth/token", identity.marketplace.api());
+    let url = format!(
+        "{}/auth/token",
+        identity.marketplace.api(identity.with_username)
+    );
     let req = Request::new("POST", url)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(refresh_body(identity));
@@ -511,6 +556,16 @@ mod tests {
     fn req() -> LoginRequest {
         LoginRequest::from_parts(
             Marketplace::Uk,
+            false,
+            "ABCdef0123456789ABCdef0123456789ABCdef01".into(),
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
+        )
+    }
+
+    fn username_req() -> LoginRequest {
+        LoginRequest::from_parts(
+            Marketplace::Uk,
+            true,
             "ABCdef0123456789ABCdef0123456789ABCdef01".into(),
             "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into(),
         )
@@ -555,7 +610,7 @@ mod tests {
 
     #[test]
     fn generated_request_shape() {
-        let r = LoginRequest::new(Marketplace::Us).unwrap();
+        let r = LoginRequest::new(Marketplace::Us, false).unwrap();
         assert_eq!(r.device_serial.len(), 40);
         assert!(r.device_serial.bytes().all(|b| b.is_ascii_alphanumeric()));
         assert_eq!(r.code_verifier().len(), 43);
@@ -600,9 +655,88 @@ mod tests {
     }
 
     #[test]
+    fn username_login_url_params() {
+        let url = username_req().login_url();
+        assert!(url.starts_with("https://www.audible.co.uk/ap/signin?"));
+        let p = |k| query_param(url.split_once('?').unwrap().1, k).unwrap();
+        assert_eq!(
+            p("openid.return_to"),
+            "https://www.audible.co.uk/ap/maplanding"
+        );
+        assert_eq!(p("openid.assoc_handle"), "amzn_audible_ios_lap_uk");
+        assert_eq!(p("pageId"), "amzn_audible_ios_privatepool");
+        assert_eq!(p("marketPlaceId"), "A2I9A3Q2GNFNGQ");
+    }
+
+    #[test]
+    fn username_login_limited_to_mkb79_marketplaces() {
+        for m in [Marketplace::Us, Marketplace::Uk, Marketplace::De] {
+            assert!(LoginRequest::new(m, true).unwrap().with_username, "{m:?}");
+        }
+        for m in [
+            Marketplace::Fr,
+            Marketplace::Ca,
+            Marketplace::It,
+            Marketplace::Au,
+            Marketplace::In,
+            Marketplace::Jp,
+            Marketplace::Es,
+            Marketplace::Br,
+        ] {
+            let err = LoginRequest::new(m, true).unwrap_err().to_string();
+            assert!(
+                err.contains("only supported for the us, uk and de"),
+                "{err}"
+            );
+            assert!(err.contains(m.country_code()), "{err}");
+            assert!(!LoginRequest::new(m, false).unwrap().with_username);
+        }
+    }
+
+    #[test]
+    fn username_redirect_requires_audible_host() {
+        let r = username_req();
+        let ok = "https://www.audible.co.uk/ap/maplanding?openid.oa2.authorization_code=Z";
+        assert_eq!(r.authorization_code(ok).unwrap(), "Z");
+        assert!(!r.is_success_redirect(
+            "https://www.amazon.co.uk/ap/maplanding?openid.oa2.authorization_code=Z"
+        ));
+        assert!(!req().is_success_redirect(ok));
+    }
+
+    #[test]
+    fn username_identity_exports_flag_and_uses_audible_api() {
+        let body = serde_json::to_vec(&register_fixture()).unwrap();
+        let (id, sent) = with_http(200, &body, || register("CODE", &username_req()));
+        assert_eq!(sent.url, "https://api.audible.co.uk/auth/register");
+        let sent_body: Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(sent_body["cookies"]["domain"], ".amazon.co.uk");
+        let id = id.unwrap();
+        assert!(id.with_username);
+        assert_eq!(id.to_audible_cli_json()["with_username"], true);
+        let a: LibationMkb79Auth = serde_json::from_value(id.to_audible_cli_json()).unwrap();
+        assert!(a.with_username);
+
+        let refreshed =
+            serde_json::to_vec(&json!({"access_token": "Atna|new", "expires_in": 3600})).unwrap();
+        let (next, sent) = with_http(200, &refreshed, || refresh(&id));
+        assert_eq!(sent.url, "https://api.audible.co.uk/auth/token");
+        assert!(next.unwrap().with_username);
+    }
+
+    #[test]
+    fn identity_without_with_username_defaults_false() {
+        let id = parse_register(&register_fixture(), &req(), 0.0).unwrap();
+        let mut v = serde_json::to_value(&id).unwrap();
+        v.as_object_mut().unwrap().remove("with_username");
+        let back: Identity = serde_json::from_value(v).unwrap();
+        assert!(!back.with_username);
+    }
+
+    #[test]
     fn code_extraction() {
         let ok = "https://www.amazon.com/ap/maplanding?openid.assoc_handle=x&openid.oa2.authorization_code=ANabc%2Bdef&openid.mode=id_res";
-        let r = LoginRequest::from_parts(Marketplace::Us, "S".into(), "V".into());
+        let r = LoginRequest::from_parts(Marketplace::Us, false, "S".into(), "V".into());
         assert!(r.is_success_redirect(ok));
         assert_eq!(r.authorization_code(ok).unwrap(), "ANabc+def");
         let signin = "https://www.amazon.com/ap/signin?openid.mode=checkid_setup";
